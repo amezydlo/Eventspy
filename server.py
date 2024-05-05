@@ -4,23 +4,30 @@ import time
 from concurrent import futures
 from typing import Dict, Union
 
-import events_pb2
-import events_pb2_grpc
 import grpc
-from events_pb2 import *
+
+from gen import events_pb2_grpc, events_pb2
+from gen.events_pb2 import Client, NotificationResponse, EventType, Notification
 
 
-class Connection:
+# import events_pb2
+# import events_pb2_grpc
+# import grpc
+# from events_pb2 import *
+
+
+class ClientContext:
     def __init__(self, client_id, client_nick, subscription_context):
         self.subscription_context = subscription_context
         self.client_id = client_id
         self.client_nick = client_nick
+        self.observed_events = {}
 
 
 class EventService(events_pb2_grpc.EventServiceServicer):
     def __init__(self, clients, event_processor, condition):
-        self.clients: Dict[int, Connection] = clients
-        self.should_stop_stream = False
+        self.clients: Dict[int, ClientContext] = clients
+        self.should_stop_stream = {}
         self.condition: threading.Condition = condition
         self.event_processor: EventProcessor = event_processor
 
@@ -48,8 +55,9 @@ class EventService(events_pb2_grpc.EventServiceServicer):
         if request.id == 0:
             print("Creating new client...")
             client_id = self.create_unique_id()
-            client_connection = Connection(client_id, request.nick, None)
+            client_connection = ClientContext(client_id, request.nick, None)
             self.clients[client_id] = client_connection
+            self.should_stop_stream[client_id] = False
             return Client(id=client_id, nick=request.nick)  # ACK
 
         elif request.id in self.clients:
@@ -61,7 +69,12 @@ class EventService(events_pb2_grpc.EventServiceServicer):
         if request.id == 0 or request.id not in self.clients:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'Client has invalid ID')
         else:
+            self.condition.acquire()
+            self.should_stop_stream[request.id] = True
+            self.condition.notify_all()
+            self.condition.release()
             del self.clients[request.id]
+            print(f"Client {request.id} disconnected")
             return NotificationResponse(message="successfully deleted client")
 
     def subscribe(self, request: events_pb2.NotificationRequest, context):
@@ -69,35 +82,37 @@ class EventService(events_pb2_grpc.EventServiceServicer):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'Client field cannot empty')
 
         client = request.client
+
         if client.id == 0:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'Client id field cannot empty')
 
         elif client.id in self.clients:
-            self.clients[client.id].subscription_context = context  # ustawiamy kontekst aby wiedzieć gdzie wysyłamy
-            # todo to be changed
-            events_raw = request.events
-            events_names = [EventType.Name(event) for event in events_raw]
+            if self.clients[client.id].subscription_context is not None:
+                context.abort(grpc.StatusCode.ALREADY_EXISTS, 'Client already opened its subscription')
 
+            self.clients[client.id].subscription_context = context  # ustawiamy kontekst aby wiedzieć gdzie wysyłamy
+
+            events_raw = request.events
             observed_events = [EventType.Value(event) for event in events_raw]
+            self.clients[client.id].observed_events = observed_events
+
+            events_names = [EventType.Name(event) for event in events_raw]
             print(f"Client {client.nick} subscribed for events {events_names}")
 
-            while not self.should_stop_stream:
+            while not self.should_stop_stream[client.id]:
                 self.condition.acquire()
-                while self.event_processor.latest_event not in observed_events:
+                while not self.should_stop_stream[client.id] and self.event_processor.latest_event not in self.clients[client.id].observed_events:
                     self.condition.wait()
-                yield Notification(events=events_raw)
+
+                if self.should_stop_stream[client.id]:
+                    del self.should_stop_stream[client.id]
+                    self.condition.release()
+                    break
+                print(
+                    f"Notifying client {self.clients[client.id].client_nick} about {self.event_processor.latest_event}")
+                yield Notification(events=[self.event_processor.latest_event])
 
                 self.condition.release()
-
-        # try:
-        #     print(f"Client {client.nick} subscribed for events {events_names}")
-        #     while not self.should_stop_stream:
-        #         yield Notification(events=events_raw)
-        #         time.sleep(5)
-        #
-        # except grpc.RpcError as e:
-        #     print(f"Error occurred for {client.nick}: {e}")
-        #     del self.clients[client.id]
 
     def unsubscribe(self, request: events_pb2.NotificationRequest, context):
         if not request.client:
@@ -108,14 +123,23 @@ class EventService(events_pb2_grpc.EventServiceServicer):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'Client.id cannot be empty')
 
         elif client.id in self.clients:
-            message = f"Client {client.nick} successfully unsubscribed"
+            if self.clients[client.id].subscription_context is None:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'Client has no subscription')
+
+            events_raw = request.events
+            unsubscribed_events = [EventType.Value(event) for event in events_raw]
+
+            print(f"Client {client.nick} unsubscribed for events {unsubscribed_events}")
+            self.clients[client.id].observed_events \
+                = [elem for elem in self.clients[client.id].observed_events if elem not in unsubscribed_events]
+
+            message = f"Client {client.nick} unsubscribed for events {unsubscribed_events}"
             return NotificationResponse(message)
-            # todo unsubscribe events
 
 
 class Server:
     def __init__(self, event_processor, condition):
-        self.clients: Dict[int, Connection] = {}
+        self.clients: Dict[int, ClientContext] = {}
         self.condition = condition
         self.event_processor = event_processor
         self.event_service = EventService(self.clients, self.event_processor, self.condition)

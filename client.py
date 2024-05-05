@@ -1,11 +1,17 @@
 import threading
 import time
 
-import events_pb2
-import events_pb2_grpc
 import grpc
 
-from events_pb2 import *
+from gen import events_pb2_grpc, events_pb2
+from gen.events_pb2 import *
+
+
+# import events_pb2
+# import events_pb2_grpc
+# import grpc
+#
+# from events_pb2 import *
 
 
 class Client:
@@ -44,7 +50,14 @@ class Client:
             # ret = stub.subscribe(request)
             # for i in ret:
             #     print(i)
-            stub.connectClient(client)
+            ret = stub.connectClient(client)
+            client.id = ret.id
+            time.sleep(5)
+
+            stub.subscribe(client=client, events=[EventType.Pop, EventType.Rock])
+
+
+            stub.disconnectClient(client)
 
         finally:
             if not self.running:
