@@ -2,18 +2,12 @@ import random
 import threading
 import time
 from concurrent import futures
-from typing import Dict, Union
+from typing import Dict, Union, List
 
 import grpc
 
 from gen import events_pb2_grpc, events_pb2
 from gen.events_pb2 import Client, NotificationResponse, EventType, Notification
-
-
-# import events_pb2
-# import events_pb2_grpc
-# import grpc
-# from events_pb2 import *
 
 
 class ClientContext:
@@ -30,6 +24,7 @@ class EventService(events_pb2_grpc.EventServiceServicer):
         self.should_stop_stream = {}
         self.condition: threading.Condition = condition
         self.event_processor: EventProcessor = event_processor
+        self.should_notify_client = {}
 
     def find_lowest_id(self, ids, l, r, lowest):
         if r < l:
@@ -93,7 +88,7 @@ class EventService(events_pb2_grpc.EventServiceServicer):
             self.clients[client.id].subscription_context = context  # ustawiamy kontekst aby wiedzieć gdzie wysyłamy
 
             events_raw = request.events
-            observed_events = [EventType.Value(event) for event in events_raw]
+            observed_events = list(events_raw)
             self.clients[client.id].observed_events = observed_events
 
             events_names = [EventType.Name(event) for event in events_raw]
@@ -101,17 +96,27 @@ class EventService(events_pb2_grpc.EventServiceServicer):
 
             while not self.should_stop_stream[client.id]:
                 self.condition.acquire()
-                while not self.should_stop_stream[client.id] and self.event_processor.latest_event not in self.clients[client.id].observed_events:
+
+                notifyme = False
+                while not self.should_stop_stream[client.id] and not notifyme:
                     self.condition.wait()
+                    if self.should_stop_stream[client.id]:
+                        del self.should_stop_stream[client.id]
+                        self.condition.release()
+                        return
+                    else:
+                        notifyme = True
 
-                if self.should_stop_stream[client.id]:
-                    del self.should_stop_stream[client.id]
-                    self.condition.release()
-                    break
-                print(
-                    f"Notifying client {self.clients[client.id].client_nick} about {self.event_processor.latest_event}")
-                yield Notification(events=[self.event_processor.latest_event])
+                events_to_notify = []
+                for event in self.event_processor.random_events:
+                    if event in self.clients[client.id].observed_events:
+                        events_to_notify.append(EventType.Name(event))
 
+                if len(events_to_notify) > 0:
+
+                    print(f"Notifying client: {client.nick} ({client.id}) about: "
+                          f"{events_to_notify}")
+                    yield Notification(events=events_to_notify)
                 self.condition.release()
 
     def unsubscribe(self, request: events_pb2.NotificationRequest, context):
@@ -170,17 +175,31 @@ class Server:
 
 class EventProcessor:
     def __init__(self, condition):
-        self.latest_event: Union[EventType, None] = None
+        self.random_events: List[EventType] = []
+
         self.condition: threading.Condition = condition
 
     def run(self):
         while True:
             self.condition.acquire()
-            self.latest_event = random.choice(EventType.values())
-            print(self.latest_event)
+            self.random_events = self.generate_random_events()
+
+            for event in self.random_events:
+                print(EventType.Name(event))
+
+            print()
+
             self.condition.notify_all()
             self.condition.release()
             time.sleep(5)
+
+    @staticmethod
+    def generate_random_events():
+        length = random.randint(1, 4)
+
+        random_events = random.sample(list(EventType.values()), length)
+
+        return random_events
 
 
 if __name__ == "__main__":

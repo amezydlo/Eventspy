@@ -7,12 +7,6 @@ from gen import events_pb2_grpc, events_pb2
 from gen.events_pb2 import *
 
 
-# import events_pb2
-# import events_pb2_grpc
-# import grpc
-#
-# from events_pb2 import *
-
 
 class Client:
     def __init__(self):
@@ -54,8 +48,14 @@ class Client:
             client.id = ret.id
             time.sleep(5)
 
-            stub.subscribe(client=client, events=[EventType.Pop, EventType.Rock])
+            notifications = NotificationRequest(client=client, events=[EventType.House])
+            ret = stub.subscribe(notifications)
 
+
+            for r in ret:
+                print(r)
+
+            time.sleep(5)
 
             stub.disconnectClient(client)
 
