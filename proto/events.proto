@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package events;
+
+service EventService {
+  rpc subscribe(NotificationRequest) returns (stream Notification) {}
+  rpc unsubscribe(NotificationRequest) returns (NotificationResponse) {}
+  rpc connectClient(Client) returns (Client) {}
+  rpc disconnectClient(Client) returns (NotificationResponse) {}
+}
+
+message Client {
+  int32 id = 1;
+  string nick = 2;
+}
+
+enum EventType {
+  Pop = 0;
+  Rock = 1;
+  Metal = 2;
+  HeavyMetal = 3;
+  House = 4;
+  Musicals = 5;
+}
+
+
+message NotificationRequest {
+  Client client = 1;
+  repeated EventType events = 3;
+}
+
+message Notification {
+  repeated EventType events = 1;
+}
+
+message NotificationResponse {
+  string message = 1;
+}
