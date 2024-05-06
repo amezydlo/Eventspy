@@ -115,7 +115,7 @@ class EventService(events_pb2_grpc.EventServiceServicer):
                 if len(events_to_notify) > 0:
 
                     print(f"Notifying client: {client.nick} ({client.id}) about: "
-                          f"{events_to_notify}")
+                          f"{events_to_notify}\n")
                     yield Notification(events=events_to_notify)
                 self.condition.release()
 
